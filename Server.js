@@ -47,6 +47,8 @@ lastReset: null,
 timestamp: null
 };
 let lastGatewayPing = 0;
+let pendingReset = { active: false, timestamp: null };
+
 
 /* =========================
 AUTH (User)
@@ -96,21 +98,36 @@ AUTH (Gateway)
 ========================= */
 function requireGatewayAuth(req, res, next) {
 const auth = req.headers.authorization || "";
-if (!auth.startsWith("Bearer ")) return res.status(401).json({ error: "Unauthorized" });
+console.log("Gateway auth attempt:", auth ? "Has auth header" : "No auth header");
+if (!auth.startsWith("Bearer ")) {
+console.log("Gateway auth failed: No Bearer prefix");
+return res.status(401).json({ error: "Unauthorized" });
+}
 const token = auth.split(" ")[1];
-if (token !== GATEWAY_TOKEN) return res.status(403).json({ error: "Forbidden" });
+console.log("Gateway token received:", token.substring(0, 10) + "...");
+console.log("Expected token:", GATEWAY_TOKEN.substring(0, 10) + "...");
+console.log("Token match:", token === GATEWAY_TOKEN);
+if (token !== GATEWAY_TOKEN) {
+console.log("Gateway auth failed: Token mismatch");
+return res.status(403).json({ error: "Forbidden" });
+}
+console.log("Gateway auth successful");
 return next();
 }
+
 
 /* =========================
 GATEWAY INGEST ROUTES
 ========================= */
 app.post("/api/gateway/state", requireGatewayAuth, (req, res) => {
+console.log("Gateway state received:", req.body);
 grinderState = { ...req.body, timestamp: new Date().toISOString() };
 lastGatewayPing = Date.now();
 grinderState.gatewayConnected = true;
+console.log("Gateway state updated, lastGatewayPing:", lastGatewayPing);
 return res.json({ success: true });
 });
+
 
 app.post("/api/gateway/alarm", requireGatewayAuth, async (req, res) => {
 try {
@@ -136,26 +153,24 @@ gatewayConnected: connected
 
 app.post("/api/reset", requireUserAuth, async (req, res) => {
 try {
-const gwRes = await fetch(`${GATEWAY_URL}/gateway/reset`, {
-method: "POST",
-headers: {
-"Content-Type": "application/json",
-"Authorization": `Bearer ${GATEWAY_TOKEN}`
-}
-});
-const gwData = await gwRes.json();
-if (!gwRes.ok) throw new Error(gwData.error || "Gateway reset failed");
-grinderState.lastReset = new Date().toISOString();
-const alarm = new Alarm({ type: "System Reset", message: "Grinder system reset performed", severity: "low" });
+pendingReset = { active: true, timestamp: new Date().toISOString() };
+const alarm = new Alarm({ type: "System Reset", message: "Grinder system reset requested", severity: "low" });
 await alarm.save();
 
-return res.json({ success: true, message: "Reset sent successfully", timestamp: grinderState.lastReset });
+return res.json({ success: true, message: "Reset queued. Gateway will process shortly.", timestamp: pendingReset.timestamp });
 } catch (err) {
 return res.status(500).json({ success: false, error: err.message });
 }
 });
 
+app.get("/api/reset-status", requireGatewayAuth, (req, res) => {
+res.json({ ...pendingReset });
+});
+
+
+
 app.get("/api/alarms", requireUserAuth, async (req, res) => {
+
 try {
 const alarms = await Alarm.find().sort({ timestamp: -1 }).limit(50);
 res.json(alarms);
